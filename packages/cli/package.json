@@ -1,0 +1,15 @@
+{
+  "name": "firemigrate",
+  "version": "0.1.0",
+  "description": "CLI-first Firebase to PostgreSQL migration foundation",
+  "bin": {
+    "firemigrate": "dist/packages/cli/src/index.js"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
