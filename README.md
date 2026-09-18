@@ -2,6 +2,8 @@
 
 FireMigrate is an open-source, CLI-first migration engine for moving Firebase Firestore and Firebase Authentication data into PostgreSQL.
 
+The web frontend lives in a separate repository: [firemigrate-web](https://github.com/ezekielreu6-bit/firemigrate-web).
+
 ## Principles
 
 - Inspect before writing
@@ -21,25 +23,36 @@ firemigrate migrate --dry-run
 firemigrate verify
 ```
 
-The web UI is an adapter around the same domain contracts used by the CLI. Core interfaces live in `packages/core/src/domain.ts`; concrete Firebase Admin and PostgreSQL drivers are intentionally isolated behind those interfaces until they can be implemented and tested with fixtures.
+## Repository layout
+
+- `packages/core` — shared migration domain contracts
+- `packages/cli` — the `firemigrate` command-line interface
 
 ## Local development
 
 ```bash
 pnpm install
-pnpm dev
+pnpm build
 ```
 
-Copy `.env.example` to `.env.local` and provide credentials locally. Secrets must never be committed, logged, or sent to the browser.
+Copy `.env.example` to your local environment when adapters require credentials. Secrets must never be committed, logged, or sent to the browser.
 
-## Architecture
+## Migration artifacts
 
-`UI → API → migration engine → Firebase discovery / analyzer / schema generator / PostgreSQL adapter`
-
-Migration artifacts are designed to include `schema.sql`, `data.sql`, `auth/users.json`, `storage/manifest.json`, and `migration-report.json`.
+Migration runs are designed to produce `schema.sql`, `data.sql`, `auth/users.json`, `storage/manifest.json`, and `migration-report.json`.
 
 ## Status
 
-This repository contains the foundation and inspectable product shell. Concrete adapters, parameterized writes, persistent migration runs, and integration fixtures are the next implementation steps; the UI does not pretend those operations are complete.
+This repository contains the CLI and domain foundation. Concrete adapters, parameterized writes, persistent migration runs, and integration fixtures are the next implementation steps.
 
 MIT licensed.
+
+## Publishing
+
+The CLI package is configured for npm publication from `packages/cli`:
+
+```bash
+cd packages/cli
+pnpm build
+npm publish
+```
