@@ -1,16 +1,16 @@
 # FireMigrate
 
-FireMigrate is an open-source, CLI-first foundation for moving Firebase Firestore and Firebase Authentication data into PostgreSQL. The package is **not on npm until it is published**; the intended package name is `firemigrate` (not the unrelated `fire-migrate`).
+FireMigrate is an open-source, CLI-first foundation for moving Firebase Firestore and Firebase Authentication data into PostgreSQL. The package is **not on npm until it is published**; the intended package name is `@ezekielreu6/firemigrate` (not the unrelated `fire-migrate`).
 
 ## Commands
 
 ```bash
-firemigrate init [--force]
-firemigrate inspect
-firemigrate schema
-firemigrate migrate --dry-run
-firemigrate migrate --write
-firemigrate verify
+@ezekielreu6/firemigrate init [--force]
+@ezekielreu6/firemigrate inspect
+@ezekielreu6/firemigrate schema
+@ezekielreu6/firemigrate migrate --dry-run
+@ezekielreu6/firemigrate migrate --write
+@ezekielreu6/firemigrate verify
 ```
 
 `init` creates `firemigrate.config.json` with safe defaults (`dryRun: true`, `destructive: false`) and `.env.example`. Existing files are never overwritten unless `--force` is passed.
@@ -40,7 +40,7 @@ node packages/cli/dist/packages/cli/src/index.js init
 ## Repository layout
 
 - `packages/core` — shared migration domain contracts
-- `packages/cli` — the `firemigrate` command-line interface
+- `packages/cli` — the `@ezekielreu6/firemigrate` command-line interface
 
 ## Publishing
 
