@@ -2,14 +2,30 @@
   "name": "@ezekielreu6/firemigrate",
   "version": "0.1.0",
   "description": "CLI-first Firebase to PostgreSQL migration foundation",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ezekielreu6-bit/firemigrate.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/ezekielreu6-bit/firemigrate/issues"
+  },
+  "homepage": "https://github.com/ezekielreu6-bit/firemigrate#readme",
+  "keywords": ["firebase", "firestore", "postgresql", "migration", "cli"],
   "bin": {
     "firemigrate": "dist/packages/cli/src/index.js"
   },
   "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "pnpm build"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
   }
 }
