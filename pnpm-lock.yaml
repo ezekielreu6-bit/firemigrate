@@ -13,9 +13,6 @@ importers:
       firebase-admin:
         specifier: ^13.10.0
         version: 13.10.0
-      pg:
-        specifier: ^8.23.0
-        version: 8.23.0
     devDependencies:
       '@types/node':
         specifier: ^24.3.0
