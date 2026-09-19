@@ -11,7 +11,7 @@ importers:
   packages/cli:
     dependencies:
       firebase-admin:
-        specifier: ^13.0.0
+        specifier: ^13.10.0
         version: 13.10.0
     devDependencies:
       '@types/node':
