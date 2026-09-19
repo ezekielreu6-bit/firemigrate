@@ -1,32 +1,28 @@
 # FireMigrate
 
-FireMigrate is an open-source, CLI-first migration engine for moving Firebase Firestore and Firebase Authentication data into PostgreSQL.
-
-The web frontend lives in a separate repository: [firemigrate-web](https://github.com/ezekielreu6-bit/firemigrate-web).
-
-## Principles
-
-- Inspect before writing
-- Generate a relational schema you can review
-- Keep uncertain relationships visible
-- Never treat Firebase passwords as plaintext
-- Default to dry-run and non-destructive migration
-- Verify the result read-only
+FireMigrate is an open-source, CLI-first foundation for moving Firebase Firestore and Firebase Authentication data into PostgreSQL. The package is **not on npm until it is published**; the intended package name is `firemigrate` (not the unrelated `fire-migrate`).
 
 ## Commands
 
 ```bash
-firemigrate init
+firemigrate init [--force]
 firemigrate inspect
 firemigrate schema
 firemigrate migrate --dry-run
+firemigrate migrate --write
 firemigrate verify
 ```
 
-## Repository layout
+`init` creates `firemigrate.config.json` with safe defaults (`dryRun: true`, `destructive: false`) and `.env.example`. Existing files are never overwritten unless `--force` is passed.
 
-- `packages/core` — shared migration domain contracts
-- `packages/cli` — the `firemigrate` command-line interface
+Required environment variables:
+
+- `FIREBASE_PROJECT_ID`
+- `FIREBASE_CLIENT_EMAIL`
+- `FIREBASE_PRIVATE_KEY`
+- `DATABASE_URL`
+
+Inspect, schema, migrate, and verify currently report missing configuration and use honest stubs. Concrete Firebase adapters, live inspection, parameterized writes, persistent migration runs, and integration fixtures are not implemented yet. Do not treat marketing-site sample counts as real inspection output.
 
 ## Local development
 
@@ -35,24 +31,29 @@ pnpm install
 pnpm build
 ```
 
-Copy `.env.example` to your local environment when adapters require credentials. Secrets must never be committed, logged, or sent to the browser.
+To run the local CLI after building:
 
-## Migration artifacts
+```bash
+node packages/cli/dist/packages/cli/src/index.js init
+```
 
-Migration runs are designed to produce `schema.sql`, `data.sql`, `auth/users.json`, `storage/manifest.json`, and `migration-report.json`.
+## Repository layout
 
-## Status
-
-This repository contains the CLI and domain foundation. Concrete adapters, parameterized writes, persistent migration runs, and integration fixtures are the next implementation steps.
-
-MIT licensed.
+- `packages/core` — shared migration domain contracts
+- `packages/cli` — the `firemigrate` command-line interface
 
 ## Publishing
 
-The CLI package is configured for npm publication from `packages/cli`:
+From the repository root, run the following exact steps:
 
 ```bash
-cd packages/cli
+pnpm install
 pnpm build
+cd packages/cli
+npm pack --dry-run
 npm publish
 ```
+
+`npm pack --dry-run` should include the compiled `dist/packages/cli/src/index.js`, `README.md`, and `LICENSE`.
+
+MIT licensed.
