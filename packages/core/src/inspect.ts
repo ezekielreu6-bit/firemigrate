@@ -6,6 +6,7 @@ export interface FirestoreSource {
   listCollectionIds(): Promise<string[]>
   countDocuments(collectionId: string): Promise<number>
   sampleDocuments(collectionId: string, limit: number): Promise<SampledDocument[]>
+  streamDocuments(collectionId: string): AsyncIterable<SampledDocument>
   listSubcollectionIds(collectionId: string, documentId: string): Promise<string[]>
 }
 
@@ -208,9 +209,15 @@ export class SourceBackedDiscovery implements FirebaseDiscovery {
     }
   }
 
-  async *streamDocuments(_collectionPath: string): AsyncIterable<Record<string, unknown>> {
-    throw new Error('Streaming documents is not implemented yet; this version only inspects.')
-    yield {}
+  async *streamDocuments(collectionPath: string): AsyncIterable<Record<string, unknown>> {
+    const opened = await this.open()
+    try {
+      for await (const document of opened.firestore.streamDocuments(collectionPath)) {
+        yield { id: document.id, ...document.data }
+      }
+    } finally {
+      await opened.close().catch(() => undefined)
+    }
   }
 
   private async readFirestore(firestore: FirestoreSource, warnings: string[]): Promise<CollectionSummary[]> {
