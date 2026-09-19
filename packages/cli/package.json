@@ -1,5 +1,5 @@
 {
-  "name": "firemigrate",
+  "name": "@ezekielreu6/firemigrate",
   "version": "0.1.0",
   "description": "CLI-first Firebase to PostgreSQL migration foundation",
   "bin": {
