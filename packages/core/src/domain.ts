@@ -36,7 +36,7 @@ export interface FirebaseDiscovery { inspect(): Promise<InspectionReport>; inspe
 
 export interface SchemaGenerator { generate(report: InspectionReport): Promise<SchemaProposal> }
 
-export interface DatabaseAdapter { name: string; connect(): Promise<void>; applySchema(schema: SchemaProposal, options: MigrationOptions): Promise<void>; insert(table: string, rows: Record<string, unknown>[]): Promise<number>; verify(): Promise<{ mismatches: number; errors: string[] }>; close(): Promise<void> }
+export interface DatabaseAdapter { name: string; connect(): Promise<void>; applySchema(schema: SchemaProposal, options: MigrationOptions): Promise<void>; insert(table: string, rows: Record<string, unknown>[]): Promise<number>; verify(): Promise<{ mismatches: number; errors: string[] }>; close(): Promise<void>; countRows?(table: string): Promise<number | null>; drainWarnings?(): string[] }
 
 export interface FireMigrateServices { discovery: FirebaseDiscovery; schema: SchemaGenerator; destination: DatabaseAdapter }
 
@@ -48,7 +48,15 @@ export function redactSecret(value: string): string { return value ? `${value.sl
 
 export function toPostgresType(types: FirestoreFieldType[]): string { if (types.length !== 1) return 'jsonb'; return ({ string: 'text', number: 'double precision', boolean: 'boolean', timestamp: 'timestamptz', reference: 'text', array: 'jsonb', map: 'jsonb', null: 'text' } as Record<string, string>)[types[0]] ?? 'jsonb' }
 
-export function createSchemaSql(tables: ProposedTable[]): string { return tables.map((table) => { const columns = table.columns.map((column) => ` "${column.name}" ${column.type}${column.nullable ? '' : ' NOT NULL'}`).join(',\n'); const foreignKeys = table.foreignKeys.filter((key) => !key.needsReview).map((key) => ` FOREIGN KEY ("${key.column}") REFERENCES "${key.references}" ("id")`).join(',\n'); return `CREATE TABLE IF NOT EXISTS "${table.name}" (\n${columns}${foreignKeys ? `,\n${foreignKeys}` : ''}\n);` }).join('\n\n') }
+export function toTableName(collectionName: string): string { return collectionName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() }
+
+export function createSchemaSql(tables: ProposedTable[]): string {
+  return tables.map((table) => {
+    const columns = table.columns.map((column) => ` "${column.name}" ${column.type}${column.nullable ? '' : ' NOT NULL'}`)
+    const constraints = [' PRIMARY KEY ("id")', ...table.foreignKeys.filter((key) => !key.needsReview).map((key) => ` FOREIGN KEY ("${key.column}") REFERENCES "${toTableName(key.references)}" ("id")`)]
+    return `CREATE TABLE IF NOT EXISTS "${table.name}" (\n${[...columns, ...constraints].join(',\n')}\n);`
+  }).join('\n\n')
+}
 
 export function createEmptyMigrationReport(): MigrationReport { return { startedAt: new Date().toISOString(), discovered: 0, migrated: 0, failed: 0, skipped: 0, mismatches: 0, errors: [] } }
 
@@ -61,55 +69,169 @@ export function createCliHelp(): string {
     '  inspect   Read-only analysis of Firestore collections and Firebase Auth (--sample=<n>, default 100 documents per collection)',
     '  schema    Generate a reviewable PostgreSQL schema from the inspection',
     '  migrate   Apply the generated schema and stream Firestore documents into PostgreSQL (--dry-run by default)',
-    '  verify    Check PostgreSQL connectivity and migration state',
+    '  verify    Check PostgreSQL connectivity and compare row counts with Firestore',
     '',
   ].join('\n')
 }
 
 export function requireConfiguration(command: string, config: FireMigrateConfig, configPath: string | null, needsDatabase: boolean): void { assertConfigured(command, config, configPath, needsDatabase) }
 
+export interface PgQueryResult { rows: Record<string, unknown>[] }
+export interface PgQueryable { query(text: string, values?: unknown[]): Promise<PgQueryResult> }
+export interface PgClient extends PgQueryable { release(): void }
+export interface PgPool extends PgQueryable { connect(): Promise<PgClient>; end(): Promise<void> }
+
+/** PostgreSQL allows 65535 bind parameters per statement; stay well under it. */
+const MAX_BIND_PARAMETERS = 60000
+const MAX_ADAPTER_MESSAGES = 20
+
 export class PostgresAdapter implements DatabaseAdapter {
   name = 'postgresql'
-  private pool: import('pg').Pool | undefined
-  constructor(private readonly databaseUrl: string) {}
+  private pool: PgPool | undefined
+  private tables = new Map<string, ProposedTable>()
+  private messages: string[] = []
+  private suppressed = 0
+  private droppedFields = new Map<string, number>()
+  constructor(private readonly databaseUrl: string, private readonly openPool?: () => Promise<PgPool>) {}
   async connect(): Promise<void> {
     if (!this.databaseUrl) throw new Error('DATABASE_URL is required')
-    const { Pool } = await import('pg')
-    this.pool = new Pool({ connectionString: this.databaseUrl, max: 4, connectionTimeoutMillis: 10000 })
+    if (this.openPool) this.pool = await this.openPool()
+    else {
+      const { Pool } = await import('pg')
+      this.pool = new Pool({ connectionString: this.databaseUrl, max: 4, connectionTimeoutMillis: 10000 }) as unknown as PgPool
+    }
     await this.pool.query('SELECT 1')
   }
   async applySchema(schema: SchemaProposal, options: MigrationOptions): Promise<void> {
     if (!schema.sql) throw new Error('Schema SQL is empty')
-    if (!options.dryRun) await this.pool?.query('BEGIN').then(() => this.pool!.query(schema.sql)).then(() => this.pool!.query('COMMIT')).catch(async (error: unknown) => { await this.pool?.query('ROLLBACK').catch(() => undefined); throw error })
+    this.tables = new Map(schema.tables.map((table) => [table.name, table]))
+    if (options.dryRun) return
+    if (!this.pool) throw new Error('Database is not connected')
+    // A pool hands out any connection per query(), so BEGIN/COMMIT must share one dedicated client to be a real transaction.
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(schema.sql)
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      client.release()
+    }
   }
   async insert(table: string, rows: Record<string, unknown>[]): Promise<number> {
-    if (!this.pool || rows.length === 0) return 0
-    const columns = Object.keys(rows[0]!).filter((column) => column !== 'id' || rows.some((row) => row.id !== undefined))
-    if (!columns.length) return 0
+    const pool = this.pool
+    if (!pool || rows.length === 0) return 0
+    const meta = this.tables.get(table)
+    const columns = meta ? meta.columns.map((column) => ({ name: column.name, type: column.type })) : unionColumns(rows)
+    const known = new Set(columns.map((column) => column.name))
+    const valid: Record<string, unknown>[] = []
+    for (const row of rows) {
+      if (row.id === undefined || row.id === null) { this.note(`${table}: a document without an id was skipped`); continue }
+      for (const key of Object.keys(row)) if (!known.has(key)) this.droppedFields.set(`${table}\u0000${key}`, (this.droppedFields.get(`${table}\u0000${key}`) ?? 0) + 1)
+      valid.push(row)
+    }
+    const perStatement = Math.max(1, Math.floor(MAX_BIND_PARAMETERS / Math.max(1, columns.length)))
+    let written = 0
+    for (let start = 0; start < valid.length; start += perStatement) {
+      const chunk = valid.slice(start, start + perStatement)
+      try {
+        await this.insertChunk(pool, table, columns, chunk)
+        written += chunk.length
+      } catch {
+        // One bad document must not sink the whole batch: retry one by one and report exactly which ones failed.
+        for (const row of chunk) {
+          try { await this.insertChunk(pool, table, columns, [row]); written += 1 } catch (error) { this.note(`${table}: document ${String(row.id)} failed: ${errorMessage(error)}`) }
+        }
+      }
+    }
+    return written
+  }
+  private async insertChunk(pool: PgPool, table: string, columns: { name: string; type: string }[], rows: Record<string, unknown>[]): Promise<void> {
     const values: unknown[] = []
-    const tuples = rows.map((row, rowIndex) => `(${columns.map((column, columnIndex) => { values.push(serializePostgresValue(row[column])); return `$${rowIndex * columns.length + columnIndex + 1}` }).join(', ')})`).join(', ')
-    const quotedTable = quoteIdentifier(table)
-    const quotedColumns = columns.map(quoteIdentifier).join(', ')
-    await this.pool.query(`INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${tuples} ON CONFLICT ("id") DO UPDATE SET ${columns.filter((column) => column !== 'id').map((column) => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(', ') || '"id" = EXCLUDED."id"'}`, values)
-    return rows.length
+    const tuples = rows.map((row) => `(${columns.map((column) => { values.push(serializeForColumn(row[column.name], column.type)); return `$${values.length}` }).join(', ')})`).join(', ')
+    const updates = columns.filter((column) => column.name !== 'id').map((column) => `${quoteIdentifier(column.name)} = EXCLUDED.${quoteIdentifier(column.name)}`)
+    await pool.query(`INSERT INTO ${quoteIdentifier(table)} (${columns.map((column) => quoteIdentifier(column.name)).join(', ')}) VALUES ${tuples} ON CONFLICT ("id") ${updates.length ? `DO UPDATE SET ${updates.join(', ')}` : 'DO NOTHING'}`, values)
+  }
+  async countRows(table: string): Promise<number | null> {
+    if (!this.pool) return null
+    try {
+      const result = await this.pool.query(`SELECT count(*) AS n FROM ${quoteIdentifier(table)}`)
+      return Number(result.rows[0]?.n ?? 0)
+    } catch (error) {
+      if ((error as { code?: string }).code === '42P01') return null
+      throw error
+    }
   }
   async verify(): Promise<{ mismatches: number; errors: string[] }> {
     if (!this.pool) return { mismatches: 0, errors: ['Database is not connected'] }
-    try { await this.pool.query('SELECT current_database()'); return { mismatches: 0, errors: [] } } catch (error) { return { mismatches: 1, errors: [error instanceof Error ? error.message : String(error)] } }
+    try { await this.pool.query('SELECT current_database()'); return { mismatches: 0, errors: [] } } catch (error) { return { mismatches: 1, errors: [errorMessage(error)] } }
+  }
+  drainWarnings(): string[] {
+    const out = [...this.messages]
+    if (this.suppressed) out.push(`${this.suppressed} more message(s) suppressed`)
+    for (const [key, count] of this.droppedFields) {
+      const [table, field] = key.split('\u0000')
+      out.push(`${table}: field "${field}" is not in the inferred schema and was skipped in ${count} document(s); the schema is inferred from a sample, so re-check it`)
+    }
+    this.messages = []
+    this.suppressed = 0
+    this.droppedFields = new Map()
+    return out
   }
   async close(): Promise<void> { await this.pool?.end(); this.pool = undefined }
+  private note(message: string): void { if (this.messages.length < MAX_ADAPTER_MESSAGES) this.messages.push(message); else this.suppressed += 1 }
 }
 
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function quoteIdentifier(value: string): string { return `"${value.replace(/"/g, '""')}"` }
+function unionColumns(rows: Record<string, unknown>[]): { name: string; type: string }[] {
+  const names = new Set<string>()
+  for (const row of rows) for (const key of Object.keys(row)) names.add(key)
+  return [...names].map((name) => ({ name, type: 'unknown' }))
+}
+/** Timestamps become ISO strings and document references become their path, instead of leaking SDK internals or cycles. */
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (value !== null && typeof value === 'object') {
+    const candidate = value as { toDate?: () => Date; path?: unknown }
+    if (typeof candidate.toDate === 'function') return candidate.toDate().toISOString()
+    if (typeof candidate.path === 'string' && 'firestore' in candidate) return candidate.path
+  }
+  return value
+}
+function serializeForColumn(value: unknown, type: string): unknown {
+  if (value === undefined || value === null) return null
+  // Mixed-type fields map to jsonb: a plain string like "hello" is not valid JSON, so every value must be JSON-encoded.
+  if (type === 'jsonb') return JSON.stringify(value, jsonReplacer)
+  return serializePostgresValue(value)
+}
 function serializePostgresValue(value: unknown): unknown {
   if (value === undefined) return null
   if (value instanceof Date) return value
   if (value !== null && typeof value === 'object') {
-    const candidate = value as { toDate?: () => Date }
+    const candidate = value as { toDate?: () => Date; path?: unknown }
     if (typeof candidate.toDate === 'function') return candidate.toDate()
-    return JSON.stringify(value)
+    if (typeof candidate.path === 'string' && 'firestore' in candidate) return candidate.path
+    return JSON.stringify(value, jsonReplacer)
   }
   return value
+}
+
+/** Compares real PostgreSQL row counts with the expected document counts. This is the only check that proves rows arrived. */
+export async function compareRowCounts(destination: DatabaseAdapter, collections: { name: string; documentCount: number }[]): Promise<{ compared: number; mismatches: number; errors: string[] }> {
+  if (!destination.countRows) return { compared: 0, mismatches: 0, errors: ['This destination cannot count rows, so no counts were compared.'] }
+  let compared = 0
+  let mismatches = 0
+  const errors: string[] = []
+  for (const collection of collections) {
+    const table = toTableName(collection.name)
+    const rows = await destination.countRows(table)
+    if (rows === null) { mismatches += 1; errors.push(`Table "${table}" does not exist in PostgreSQL (Firestore collection "${collection.name}" has ${collection.documentCount} documents)`); continue }
+    compared += 1
+    if (rows !== collection.documentCount) { mismatches += 1; errors.push(`"${table}": PostgreSQL has ${rows} rows, expected ${collection.documentCount}`) }
+  }
+  return { compared, mismatches, errors }
 }
 
 export class UnconfiguredFirebaseDiscovery implements FirebaseDiscovery {
@@ -121,7 +243,15 @@ export class UnconfiguredFirebaseDiscovery implements FirebaseDiscovery {
 }
 
 export class BasicSchemaGenerator implements SchemaGenerator {
-  async generate(report: InspectionReport): Promise<SchemaProposal> { const tables = report.collections.map((collection) => ({ name: collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), sourcePath: collection.path, columns: [{ name: 'id', type: 'text', nullable: false, sourceField: '__name__' }, ...collection.fields.map((field) => ({ name: field.name, type: toPostgresType(field.types), nullable: field.presenceRate < 1, sourceField: field.name }))], foreignKeys: collection.fields.filter((field) => field.relationship).map((field) => ({ column: field.name, references: field.relationship!.targetCollection, confidence: field.relationship!.confidence, needsReview: field.relationship!.confidence < 0.85 })) })); return { tables, sql: createSchemaSql(tables), warnings: report.warnings } }
+  async generate(report: InspectionReport): Promise<SchemaProposal> {
+    const warnings = [...report.warnings]
+    const tables = report.collections.map((collection) => {
+      if (collection.fields.some((field) => field.name === 'id')) warnings.push(`${collection.name} has a document field named "id"; it collides with the document id column and is not migrated`)
+      const fields = collection.fields.filter((field) => field.name !== 'id')
+      return { name: toTableName(collection.name), sourcePath: collection.path, columns: [{ name: 'id', type: 'text', nullable: false, sourceField: '__name__' }, ...fields.map((field) => ({ name: field.name, type: toPostgresType(field.types), nullable: field.presenceRate < 1, sourceField: field.name }))], foreignKeys: fields.filter((field) => field.relationship).map((field) => ({ column: field.name, references: field.relationship!.targetCollection, confidence: field.relationship!.confidence, needsReview: field.relationship!.confidence < 0.85 })) }
+    })
+    return { tables, sql: createSchemaSql(tables), warnings }
+  }
 }
 
 export interface ServiceExtras { onProgress?: (message: string) => void; inspect?: Partial<InspectOptions> }
@@ -161,25 +291,38 @@ export async function runMigration(services: FireMigrateServices, options: Migra
     assertFirestoreReadable(inspection)
     const schema = await services.schema.generate(inspection)
     await services.destination.applySchema(schema, options)
+    const streamed: { name: string; documentCount: number }[] = []
     for (const collection of inspection.collections) {
-      const rows: Record<string, unknown>[] = []
+      const table = toTableName(collection.name)
+      let rows: Record<string, unknown>[] = []
+      let streamedCount = 0
+      const flush = async (): Promise<void> => {
+        if (!rows.length) return
+        const batch = rows
+        rows = []
+        if (options.dryRun) { report.skipped += batch.length; return }
+        const written = await services.destination.insert(table, batch)
+        report.migrated += written
+        report.failed += batch.length - written
+      }
       for await (const document of services.discovery.streamDocuments(collection.path)) {
         report.discovered += 1
+        streamedCount += 1
         rows.push(document)
-        if (rows.length >= options.batchSize) {
-          if (options.dryRun) report.skipped += rows.length
-          else report.migrated += await services.destination.insert(collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), rows.splice(0))
-        }
+        if (rows.length >= options.batchSize) await flush()
       }
-      if (rows.length) {
-        if (options.dryRun) report.skipped += rows.length
-        else report.migrated += await services.destination.insert(collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), rows)
-      }
+      await flush()
+      streamed.push({ name: collection.name, documentCount: streamedCount })
     }
-    const verification = await services.destination.verify()
-    report.mismatches = verification.mismatches
-    report.errors.push(...verification.errors)
-    report.notes = options.dryRun ? ['Dry run: no data was written.'] : ['Schema and document batches were committed to PostgreSQL.']
+    if (options.dryRun) {
+      report.notes = ['Dry run: no data was written.', 'Row counts are only compared on a real write.']
+    } else {
+      const comparison = await compareRowCounts(services.destination, streamed)
+      report.mismatches = comparison.mismatches
+      report.errors.push(...comparison.errors)
+      report.notes = ['Documents were upserted by id in batches, then PostgreSQL row counts were compared with the documents streamed from Firestore.']
+    }
+    report.errors.push(...(services.destination.drainWarnings?.() ?? []))
     report.completedAt = new Date().toISOString()
     return report
   } finally {
@@ -194,10 +337,19 @@ export async function runCli(args: string[], services?: FireMigrateServices): Pr
   if (command === 'init') return initializeProject(rest)
   if (command === 'verify') {
     const { config, configPath } = loadConfig()
-    requireConfiguration(command, config, configPath, true)
+    if (!services) requireConfiguration(command, config, configPath, true)
     const active = services ?? createServices(undefined, config)
     await active.destination.connect()
-    try { return JSON.stringify(await active.destination.verify(), null, 2) } finally { await active.destination.close() }
+    try {
+      const connectivity = await active.destination.verify()
+      const inspection = await active.discovery.inspect()
+      assertFirestoreReadable(inspection)
+      const comparison = await compareRowCounts(active.destination, inspection.collections)
+      const mismatches = connectivity.mismatches + comparison.mismatches
+      const errors = [...connectivity.errors, ...comparison.errors]
+      if (mismatches || errors.length) process.exitCode = 1
+      return JSON.stringify({ connected: connectivity.errors.length === 0, tablesCompared: comparison.compared, mismatches, errors }, null, 2)
+    } finally { await active.destination.close() }
   }
 
   const { config, configPath } = loadConfig()
@@ -221,7 +373,9 @@ export async function runCli(args: string[], services?: FireMigrateServices): Pr
 
   const options = resolveMigrateOptions(rest, config)
   if (!services) requireConfiguration(command, config, configPath, true)
-  return JSON.stringify(await runMigration(services ?? createServices(undefined, config), options), null, 2)
+  const migration = await runMigration(services ?? createServices(undefined, config), options)
+  if (migration.failed > 0 || migration.mismatches > 0) process.exitCode = 1
+  return JSON.stringify(migration, null, 2)
 }
 
 export function parseInspectArgs(args: string[]): Partial<InspectOptions> {
