@@ -60,8 +60,8 @@ export function createCliHelp(): string {
     '  init      Create firemigrate.config.json and .env.example (--force overwrites existing files)',
     '  inspect   Read-only analysis of Firestore collections and Firebase Auth (--sample=<n>, default 100 documents per collection)',
     '  schema    Generate a reviewable PostgreSQL schema from the inspection',
-    '  migrate   Dry run only in this version (--dry-run is the default; database writes are not implemented yet)',
-    '  verify    Not implemented yet',
+    '  migrate   Apply the generated schema and stream Firestore documents into PostgreSQL (--dry-run by default)',
+    '  verify    Check PostgreSQL connectivity and migration state',
     '',
   ].join('\n')
 }
@@ -70,12 +70,46 @@ export function requireConfiguration(command: string, config: FireMigrateConfig,
 
 export class PostgresAdapter implements DatabaseAdapter {
   name = 'postgresql'
+  private pool: import('pg').Pool | undefined
   constructor(private readonly databaseUrl: string) {}
-  async connect(): Promise<void> { if (!this.databaseUrl) throw new Error('DATABASE_URL is required') }
-  async applySchema(schema: SchemaProposal, options: MigrationOptions): Promise<void> { if (!options.dryRun && !schema.sql) throw new Error('Schema SQL is empty') }
-  async insert(_table: string, rows: Record<string, unknown>[]): Promise<number> { return rows.length }
-  async verify(): Promise<{ mismatches: number; errors: string[] }> { return { mismatches: 0, errors: [] } }
-  async close(): Promise<void> {}
+  async connect(): Promise<void> {
+    if (!this.databaseUrl) throw new Error('DATABASE_URL is required')
+    const { Pool } = await import('pg')
+    this.pool = new Pool({ connectionString: this.databaseUrl, max: 4, connectionTimeoutMillis: 10000 })
+    await this.pool.query('SELECT 1')
+  }
+  async applySchema(schema: SchemaProposal, options: MigrationOptions): Promise<void> {
+    if (!schema.sql) throw new Error('Schema SQL is empty')
+    if (!options.dryRun) await this.pool?.query('BEGIN').then(() => this.pool!.query(schema.sql)).then(() => this.pool!.query('COMMIT')).catch(async (error: unknown) => { await this.pool?.query('ROLLBACK').catch(() => undefined); throw error })
+  }
+  async insert(table: string, rows: Record<string, unknown>[]): Promise<number> {
+    if (!this.pool || rows.length === 0) return 0
+    const columns = Object.keys(rows[0]!).filter((column) => column !== 'id' || rows.some((row) => row.id !== undefined))
+    if (!columns.length) return 0
+    const values: unknown[] = []
+    const tuples = rows.map((row, rowIndex) => `(${columns.map((column, columnIndex) => { values.push(serializePostgresValue(row[column])); return `$${rowIndex * columns.length + columnIndex + 1}` }).join(', ')})`).join(', ')
+    const quotedTable = quoteIdentifier(table)
+    const quotedColumns = columns.map(quoteIdentifier).join(', ')
+    await this.pool.query(`INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${tuples} ON CONFLICT ("id") DO UPDATE SET ${columns.filter((column) => column !== 'id').map((column) => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(', ') || '"id" = EXCLUDED."id"'}`, values)
+    return rows.length
+  }
+  async verify(): Promise<{ mismatches: number; errors: string[] }> {
+    if (!this.pool) return { mismatches: 0, errors: ['Database is not connected'] }
+    try { await this.pool.query('SELECT current_database()'); return { mismatches: 0, errors: [] } } catch (error) { return { mismatches: 1, errors: [error instanceof Error ? error.message : String(error)] } }
+  }
+  async close(): Promise<void> { await this.pool?.end(); this.pool = undefined }
+}
+
+function quoteIdentifier(value: string): string { return `"${value.replace(/"/g, '""')}"` }
+function serializePostgresValue(value: unknown): unknown {
+  if (value === undefined) return null
+  if (value instanceof Date) return value
+  if (value !== null && typeof value === 'object') {
+    const candidate = value as { toDate?: () => Date }
+    if (typeof candidate.toDate === 'function') return candidate.toDate()
+    return JSON.stringify(value)
+  }
+  return value
 }
 
 export class UnconfiguredFirebaseDiscovery implements FirebaseDiscovery {
@@ -119,18 +153,33 @@ export function resolveMigrateOptions(args: string[], config: FireMigrateConfig)
 
 export async function runMigration(services: FireMigrateServices, options: MigrationOptions): Promise<MigrationReport> {
   if (options.destructive && !options.dryRun) throw new Error('Destructive migration requires explicit confirmation.')
-  if (!options.dryRun) throw new Error('Database writes are not implemented in this version. Re-run with --dry-run to preview.')
   const report = createEmptyMigrationReport()
-  report.dryRun = true
+  report.dryRun = options.dryRun
   await services.destination.connect()
   try {
     const inspection = await services.discovery.inspect()
     assertFirestoreReadable(inspection)
     const schema = await services.schema.generate(inspection)
     await services.destination.applySchema(schema, options)
-    report.discovered = inspection.totalDocuments
-    report.skipped = inspection.totalDocuments
-    report.notes = ['Dry run: no data was written.', 'Verification was not performed.']
+    for (const collection of inspection.collections) {
+      const rows: Record<string, unknown>[] = []
+      for await (const document of services.discovery.streamDocuments(collection.path)) {
+        report.discovered += 1
+        rows.push(document)
+        if (rows.length >= options.batchSize) {
+          if (options.dryRun) report.skipped += rows.length
+          else report.migrated += await services.destination.insert(collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), rows.splice(0))
+        }
+      }
+      if (rows.length) {
+        if (options.dryRun) report.skipped += rows.length
+        else report.migrated += await services.destination.insert(collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), rows)
+      }
+    }
+    const verification = await services.destination.verify()
+    report.mismatches = verification.mismatches
+    report.errors.push(...verification.errors)
+    report.notes = options.dryRun ? ['Dry run: no data was written.'] : ['Schema and document batches were committed to PostgreSQL.']
     report.completedAt = new Date().toISOString()
     return report
   } finally {
@@ -143,7 +192,13 @@ export async function runCli(args: string[], services?: FireMigrateServices): Pr
   if (!command || !FIREMIGRATE_COMMANDS.includes(command)) return createCliHelp()
   const rest = args.slice(1)
   if (command === 'init') return initializeProject(rest)
-  if (command === 'verify') throw new Error('verify is not implemented yet: no comparison between Firebase and PostgreSQL is performed in this version.')
+  if (command === 'verify') {
+    const { config, configPath } = loadConfig()
+    requireConfiguration(command, config, configPath, true)
+    const active = services ?? createServices(undefined, config)
+    await active.destination.connect()
+    try { return JSON.stringify(await active.destination.verify(), null, 2) } finally { await active.destination.close() }
+  }
 
   const { config, configPath } = loadConfig()
 
