@@ -1,6 +1,6 @@
 {
   "name": "@ezekielreu6/firemigrate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI-first Firebase to PostgreSQL migration foundation",
   "license": "MIT",
   "repository": {
@@ -17,12 +17,19 @@
     "firemigrate": "dist/packages/cli/src/index.js"
   },
   "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "pnpm clean && tsc -p tsconfig.json",
     "prepublishOnly": "pnpm build"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
