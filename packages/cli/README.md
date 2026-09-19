@@ -5,8 +5,8 @@ CLI-first Firebase Firestore and Authentication migration foundation for Postgre
 See the repository README for setup, environment variables, and current implementation status.
 
 ```bash
-npx firemigrate init
-npx firemigrate migrate --dry-run
+npx @ezekielreu6/firemigrate init
+npx @ezekielreu6/firemigrate migrate --dry-run
 ```
 
 Concrete Firebase adapters and live database writes are not implemented yet.
