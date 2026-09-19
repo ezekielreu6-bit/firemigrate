@@ -1,0 +1,9 @@
+{
+  "name": "@ezekielreu6/firemigrate-core",
+  "private": true,
+  "version": "0.1.1",
+  "type": "commonjs",
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}
