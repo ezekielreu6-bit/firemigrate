@@ -193,9 +193,16 @@ class SourceBackedDiscovery {
             await opened.close().catch(() => undefined);
         }
     }
-    async *streamDocuments(_collectionPath) {
-        throw new Error('Streaming documents is not implemented yet; this version only inspects.');
-        yield {};
+    async *streamDocuments(collectionPath) {
+        const opened = await this.open();
+        try {
+            for await (const document of opened.firestore.streamDocuments(collectionPath)) {
+                yield { id: document.id, ...document.data };
+            }
+        }
+        finally {
+            await opened.close().catch(() => undefined);
+        }
     }
     async readFirestore(firestore, warnings) {
         const ids = (await firestore.listCollectionIds()).sort();

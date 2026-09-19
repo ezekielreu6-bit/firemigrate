@@ -23,6 +23,10 @@ export async function openFirebaseAdmin(config: FireMigrateConfig): Promise<Open
       const snapshot = await db.collection(collectionId).limit(limit).get()
       return snapshot.docs.map((doc): SampledDocument => ({ id: doc.id, data: doc.data() as Record<string, unknown> }))
     },
+    async *streamDocuments(collectionId) {
+      const snapshot = await db.collection(collectionId).get()
+      for (const doc of snapshot.docs) yield { id: doc.id, data: doc.data() as Record<string, unknown> }
+    },
     async listSubcollectionIds(collectionId, documentId) {
       return (await db.collection(collectionId).doc(documentId).listCollections()).map((collection) => collection.id)
     },

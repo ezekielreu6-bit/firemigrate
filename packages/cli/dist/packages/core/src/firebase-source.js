@@ -53,6 +53,11 @@ async function openFirebaseAdmin(config) {
             const snapshot = await db.collection(collectionId).limit(limit).get();
             return snapshot.docs.map((doc) => ({ id: doc.id, data: doc.data() }));
         },
+        async *streamDocuments(collectionId) {
+            const snapshot = await db.collection(collectionId).get();
+            for (const doc of snapshot.docs)
+                yield { id: doc.id, data: doc.data() };
+        },
         async listSubcollectionIds(collectionId, documentId) {
             return (await db.collection(collectionId).doc(documentId).listCollections()).map((collection) => collection.id);
         },

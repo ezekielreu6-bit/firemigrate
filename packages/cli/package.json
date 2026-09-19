@@ -12,11 +12,21 @@
     "url": "https://github.com/ezekielreu6-bit/firemigrate/issues"
   },
   "homepage": "https://github.com/ezekielreu6-bit/firemigrate#readme",
-  "keywords": ["firebase", "firestore", "postgresql", "migration", "cli"],
+  "keywords": [
+    "firebase",
+    "firestore",
+    "postgresql",
+    "migration",
+    "cli"
+  ],
   "bin": {
     "firemigrate": "dist/packages/cli/src/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -29,10 +39,12 @@
     "node": ">=20"
   },
   "dependencies": {
-    "firebase-admin": "^13.0.0"
+    "firebase-admin": "^13.0.0",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.9.2"
   }
 }

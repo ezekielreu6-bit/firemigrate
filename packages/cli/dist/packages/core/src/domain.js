@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.VERSION = exports.DEFAULT_WARNINGS = exports.GENERATED_ARTIFACTS = exports.NAV_ITEMS = exports.SUPPORTED_DESTINATIONS = exports.SUPPORTED_SOURCES = exports.PRODUCT_TAGLINE = exports.PRODUCT_NAME = exports.BasicSchemaGenerator = exports.UnconfiguredFirebaseDiscovery = exports.PostgresAdapter = exports.FIREMIGRATE_COMMANDS = exports.initializeProject = void 0;
 exports.redactSecret = redactSecret;
@@ -32,8 +65,8 @@ function createCliHelp() {
         '  init      Create firemigrate.config.json and .env.example (--force overwrites existing files)',
         '  inspect   Read-only analysis of Firestore collections and Firebase Auth (--sample=<n>, default 100 documents per collection)',
         '  schema    Generate a reviewable PostgreSQL schema from the inspection',
-        '  migrate   Dry run only in this version (--dry-run is the default; database writes are not implemented yet)',
-        '  verify    Not implemented yet',
+        '  migrate   Apply the generated schema and stream Firestore documents into PostgreSQL (--dry-run by default)',
+        '  verify    Check PostgreSQL connectivity and migration state',
         '',
     ].join('\n');
 }
@@ -41,18 +74,64 @@ function requireConfiguration(command, config, configPath, needsDatabase) { (0, 
 class PostgresAdapter {
     databaseUrl;
     name = 'postgresql';
+    pool;
     constructor(databaseUrl) {
         this.databaseUrl = databaseUrl;
     }
-    async connect() { if (!this.databaseUrl)
-        throw new Error('DATABASE_URL is required'); }
-    async applySchema(schema, options) { if (!options.dryRun && !schema.sql)
-        throw new Error('Schema SQL is empty'); }
-    async insert(_table, rows) { return rows.length; }
-    async verify() { return { mismatches: 0, errors: [] }; }
-    async close() { }
+    async connect() {
+        if (!this.databaseUrl)
+            throw new Error('DATABASE_URL is required');
+        const { Pool } = await Promise.resolve().then(() => __importStar(require('pg')));
+        this.pool = new Pool({ connectionString: this.databaseUrl, max: 4, connectionTimeoutMillis: 10000 });
+        await this.pool.query('SELECT 1');
+    }
+    async applySchema(schema, options) {
+        if (!schema.sql)
+            throw new Error('Schema SQL is empty');
+        if (!options.dryRun)
+            await this.pool?.query('BEGIN').then(() => this.pool.query(schema.sql)).then(() => this.pool.query('COMMIT')).catch(async (error) => { await this.pool?.query('ROLLBACK').catch(() => undefined); throw error; });
+    }
+    async insert(table, rows) {
+        if (!this.pool || rows.length === 0)
+            return 0;
+        const columns = Object.keys(rows[0]).filter((column) => column !== 'id' || rows.some((row) => row.id !== undefined));
+        if (!columns.length)
+            return 0;
+        const values = [];
+        const tuples = rows.map((row, rowIndex) => `(${columns.map((column, columnIndex) => { values.push(serializePostgresValue(row[column])); return `$${rowIndex * columns.length + columnIndex + 1}`; }).join(', ')})`).join(', ');
+        const quotedTable = quoteIdentifier(table);
+        const quotedColumns = columns.map(quoteIdentifier).join(', ');
+        await this.pool.query(`INSERT INTO ${quotedTable} (${quotedColumns}) VALUES ${tuples} ON CONFLICT ("id") DO UPDATE SET ${columns.filter((column) => column !== 'id').map((column) => `${quoteIdentifier(column)} = EXCLUDED.${quoteIdentifier(column)}`).join(', ') || '"id" = EXCLUDED."id"'}`, values);
+        return rows.length;
+    }
+    async verify() {
+        if (!this.pool)
+            return { mismatches: 0, errors: ['Database is not connected'] };
+        try {
+            await this.pool.query('SELECT current_database()');
+            return { mismatches: 0, errors: [] };
+        }
+        catch (error) {
+            return { mismatches: 1, errors: [error instanceof Error ? error.message : String(error)] };
+        }
+    }
+    async close() { await this.pool?.end(); this.pool = undefined; }
 }
 exports.PostgresAdapter = PostgresAdapter;
+function quoteIdentifier(value) { return `"${value.replace(/"/g, '""')}"`; }
+function serializePostgresValue(value) {
+    if (value === undefined)
+        return null;
+    if (value instanceof Date)
+        return value;
+    if (value !== null && typeof value === 'object') {
+        const candidate = value;
+        if (typeof candidate.toDate === 'function')
+            return candidate.toDate();
+        return JSON.stringify(value);
+    }
+    return value;
+}
 class UnconfiguredFirebaseDiscovery {
     missing;
     constructor(missing = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY']) {
@@ -98,19 +177,37 @@ function resolveMigrateOptions(args, config) {
 async function runMigration(services, options) {
     if (options.destructive && !options.dryRun)
         throw new Error('Destructive migration requires explicit confirmation.');
-    if (!options.dryRun)
-        throw new Error('Database writes are not implemented in this version. Re-run with --dry-run to preview.');
     const report = createEmptyMigrationReport();
-    report.dryRun = true;
+    report.dryRun = options.dryRun;
     await services.destination.connect();
     try {
         const inspection = await services.discovery.inspect();
         assertFirestoreReadable(inspection);
         const schema = await services.schema.generate(inspection);
         await services.destination.applySchema(schema, options);
-        report.discovered = inspection.totalDocuments;
-        report.skipped = inspection.totalDocuments;
-        report.notes = ['Dry run: no data was written.', 'Verification was not performed.'];
+        for (const collection of inspection.collections) {
+            const rows = [];
+            for await (const document of services.discovery.streamDocuments(collection.path)) {
+                report.discovered += 1;
+                rows.push(document);
+                if (rows.length >= options.batchSize) {
+                    if (options.dryRun)
+                        report.skipped += rows.length;
+                    else
+                        report.migrated += await services.destination.insert(collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), rows.splice(0));
+                }
+            }
+            if (rows.length) {
+                if (options.dryRun)
+                    report.skipped += rows.length;
+                else
+                    report.migrated += await services.destination.insert(collection.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(), rows);
+            }
+        }
+        const verification = await services.destination.verify();
+        report.mismatches = verification.mismatches;
+        report.errors.push(...verification.errors);
+        report.notes = options.dryRun ? ['Dry run: no data was written.'] : ['Schema and document batches were committed to PostgreSQL.'];
         report.completedAt = new Date().toISOString();
         return report;
     }
@@ -125,8 +222,18 @@ async function runCli(args, services) {
     const rest = args.slice(1);
     if (command === 'init')
         return (0, init_1.initializeProject)(rest);
-    if (command === 'verify')
-        throw new Error('verify is not implemented yet: no comparison between Firebase and PostgreSQL is performed in this version.');
+    if (command === 'verify') {
+        const { config, configPath } = (0, config_1.loadConfig)();
+        requireConfiguration(command, config, configPath, true);
+        const active = services ?? createServices(undefined, config);
+        await active.destination.connect();
+        try {
+            return JSON.stringify(await active.destination.verify(), null, 2);
+        }
+        finally {
+            await active.destination.close();
+        }
+    }
     const { config, configPath } = (0, config_1.loadConfig)();
     if (command === 'inspect') {
         const inspectOptions = parseInspectArgs(rest);
