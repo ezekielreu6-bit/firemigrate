@@ -1,6 +1,6 @@
 {
   "name": "@ezekielreu6/firemigrate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CLI-first Firebase to PostgreSQL migration foundation",
   "license": "MIT",
   "repository": {
@@ -39,7 +39,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "firebase-admin": "^13.10.0"
+    "firebase-admin": "^13.10.0",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

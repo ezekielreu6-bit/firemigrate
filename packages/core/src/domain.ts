@@ -252,6 +252,6 @@ export const GENERATED_ARTIFACTS = ['schema.sql', 'data.sql', 'auth/users.json',
 
 export const DEFAULT_WARNINGS = ['Review inferred relationships before applying the schema.', 'Mixed Firestore field types are stored as jsonb until reviewed.', 'Authentication credentials require Firebase-supported import/export flows.']
 
-export const VERSION = '0.1.1'
+export const VERSION = '0.1.2'
 
 export default { createServices, runMigration, runCli }
