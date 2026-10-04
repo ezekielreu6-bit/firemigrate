@@ -1,79 +1,58 @@
 # FireMigrate
 
-FireMigrate is an open-source, CLI-first tool for moving Firebase Firestore data into PostgreSQL. It inspects your project, proposes a relational schema, and migrates deliberately: nothing is written until you explicitly ask for it.
+FireMigrate moves Firebase Firestore, subcollections, Auth users, and Storage metadata into PostgreSQL. Nothing is written until you pass `--write` and set `"dryRun": false`.
 
-The package is [`@ezekielreu6/firemigrate`](https://www.npmjs.com/package/@ezekielreu6/firemigrate) (not the unrelated `fire-migrate`). No install is needed:
+Supabase is a valid destination because it is PostgreSQL. Use the direct database connection string as `DATABASE_URL`, not the project HTTP URL. This writes ordinary tables. It does not insert into Supabase `auth.users` or copy Storage file bytes.
 
 ```bash
 npx @ezekielreu6/firemigrate init
+npx @ezekielreu6/firemigrate inspect
+npx @ezekielreu6/firemigrate schema
+npx @ezekielreu6/firemigrate migrate --dry-run
 ```
 
-## Requirements
-
-- Node.js 20 or newer
-- A Firebase service account with read access to Firestore and Firebase Authentication
-- A PostgreSQL database (only needed for `migrate` and `verify`)
-
-## Quick start
-
-```bash
-npx @ezekielreu6/firemigrate init         # create the config files
-# add your Firebase credentials (see Configuration), then:
-npx @ezekielreu6/firemigrate inspect      # read-only analysis of your project
-npx @ezekielreu6/firemigrate schema       # print the proposed PostgreSQL schema
-npx @ezekielreu6/firemigrate migrate --dry-run   # preview, writes nothing
-```
-
-When the preview looks right, set `"dryRun": false` in `firemigrate.config.json` and run:
+When the dry run counts look right:
 
 ```bash
 npx @ezekielreu6/firemigrate migrate --write
 npx @ezekielreu6/firemigrate verify
 ```
 
+## What is written
+
+- Top-level collections become tables, upserted by document `id`. Each row also gets `_path`.
+- Subcollections become `parent__child` tables with `_parent_id`, `_parent_path`, and `_path`. A parent foreign key is proposed but not applied, so an orphan document cannot abort the load. Add the constraint yourself after you have checked orphans.
+- Auth users go to `firebase_auth_users`. Password hashes and salts are stored when the Admin SDK returns them, and are never printed. If you set the Firebase password-hash parameters, `supabase_password_hash` is filled in `$fbscrypt$` form for a later Supabase Auth import.
+- Storage object names, size, content type, and checksum go to `firebase_storage_objects`. File bytes stay in Firebase.
+
+Skip a piece with `--skip-auth`, `--skip-storage`, or `--skip-subcollections`.
+
+## Production cutover
+
+1. Run `inspect` and `schema` against a copy of the database first. The schema is inferred from a sample, so fields that appear only later are skipped and reported.
+2. Use a Firebase service account that can read Firestore, Auth, and Storage. Password hashes are returned only when that account is allowed to read Auth user credentials.
+3. For Supabase, copy the direct or session connection string. Prefer `sslmode=verify-full` if `pg` warns about `sslmode`.
+4. Keep `"dryRun": true` until a dry run has been reviewed. A write also requires `--write`.
+5. Re-running is safe: rows are upserted by `id`. Existing tables are not altered. If a table was created by an older version, create the new table yourself or the new columns will be missing.
+6. Subcollections are found by probing the first documents of each parent. A subcollection that never appears there is missed. Raise the probe with a fresh inspect only by changing code; the default probe is 25 documents.
+7. Copy password-hash parameters from Firebase console > Authentication > Users > menu > Password hash parameters. Without them, raw `password_hash` and `password_salt` are still stored and `supabase_password_hash` stays null.
+8. After the data load, rewrite Firestore rules as Row Level Security, import Auth into Supabase Auth if you need password login, and copy Storage bytes separately. Then compare `verify` before you point the app at Postgres.
+
 ## Commands
 
-### `init [--force]`
+`init [--force]` creates `firemigrate.config.json` and `.env.example`. It never writes credentials, and it refuses to overwrite existing files unless you pass `--force`.
 
-Creates `firemigrate.config.json` (safe defaults: `dryRun: true`, `destructive: false`, `batchSize: 500`, empty credential fields) and `.env.example`, and prints the paths it wrote. If either file already exists, nothing is written unless you pass `--force`. It never writes credentials.
+`inspect [--sample=<n>]` is read-only. It counts collections, probes subcollections, summarizes Auth, and lists Storage metadata. `--sample` is 1 to 1000, default 100.
 
-### `inspect [--sample=<n>]`
+`schema` prints the proposed SQL and applies nothing.
 
-Read-only. Needs the three `FIREBASE_*` variables only.
+`migrate` defaults to `--dry-run`. `--write` applies `CREATE TABLE IF NOT EXISTS` and upserts. `--destructive` is still refused.
 
-- Lists top-level Firestore collections and counts their documents.
-- Reads up to `n` documents per collection (default 100, maximum 1000, in document-ID order) to infer field types and how often each field appears.
-- Warns about fields with mixed types and about relationships it cannot be sure of.
-- Summarizes Firebase Auth: user count and sign-in providers. Password hashes are never read or printed.
-- Detects subcollections by probing the first documents of each collection and lists them as warnings. They are not analyzed yet.
-
-Exits with code 1 if Firestore or Auth could not be read.
-
-### `schema`
-
-Prints a reviewable PostgreSQL schema built from the same inspection. Needs the three `FIREBASE_*` variables only. Nothing is applied.
-
-- One table per top-level collection, with `id text` as the primary key.
-- Fields with mixed types become `jsonb`. Maps and arrays become `jsonb`. Timestamps become `timestamptz`.
-- Firestore document references become foreign keys only when the target collection is known and the match is certain. Guesses based on names alone (for example `userId` pointing at `users`) are reported as warnings, never as foreign keys.
-- A document field literally named `id` collides with the id column, so it is skipped and reported.
-
-### `migrate [--dry-run | --write]`
-
-Needs all four variables.
-
-- **`--dry-run` (the default)** streams every document and reports counts without writing to PostgreSQL. Firestore reads still apply and are billed as usual.
-- **`--write`** applies the schema in a single transaction, then upserts documents by `id` in batches of `batchSize`, so re-running is safe. Existing tables are not altered. If a batch fails, it retries document by document and reports exactly which documents failed. Afterwards it compares PostgreSQL row counts with the documents streamed from Firestore. Exits with code 1 on any failure or mismatch.
-- Writing needs two explicit opt-ins: the `--write` flag and `"dryRun": false` in `firemigrate.config.json`.
-- `--destructive` needs `--write` and `"destructive": true`, but destructive migrations are refused in this version.
-
-### `verify`
-
-Needs all four variables. Connects to PostgreSQL and compares each table's row count with the document count of its Firestore collection. Reports any missing table or count mismatch and exits with code 1 if it finds one.
+`verify` compares PostgreSQL row counts with the counts from the write. Estimated subcollection and Storage sample counts are not treated as failures.
 
 ## Configuration
 
-Environment variables take precedence over `firemigrate.config.json`.
+Environment variables win over `firemigrate.config.json`.
 
 | Variable | Used by |
 | --- | --- |
@@ -81,60 +60,44 @@ Environment variables take precedence over `firemigrate.config.json`.
 | `FIREBASE_CLIENT_EMAIL` | inspect, schema, migrate, verify |
 | `FIREBASE_PRIVATE_KEY` | inspect, schema, migrate, verify |
 | `DATABASE_URL` | migrate, verify |
-
-The private key may contain literal `\n` sequences, exactly as it appears in the downloaded service-account JSON.
+| `FIREBASE_HASH_SIGNER_KEY` | optional, builds `supabase_password_hash` |
+| `FIREBASE_HASH_SALT_SEPARATOR` | optional |
+| `FIREBASE_HASH_ROUNDS` | optional, default 8 |
+| `FIREBASE_HASH_MEM_COST` | optional, default 14 |
+| `FIREBASE_STORAGE_BUCKET` | optional |
 
 ```json
 {
   "dryRun": true,
   "destructive": false,
   "batchSize": 500,
+  "subcollections": true,
   "firebase": { "projectId": "", "clientEmail": "", "privateKey": "" },
-  "postgres": { "databaseUrl": "" }
+  "postgres": { "databaseUrl": "" },
+  "auth": {
+    "migrate": true,
+    "includePasswordHashes": true,
+    "hash": { "signerKey": "", "saltSeparator": "", "rounds": 8, "memCost": 14 }
+  },
+  "storage": { "migrateMetadata": true, "bucket": "" }
 }
 ```
 
-Never commit service-account keys or connection strings. Prefer environment variables, and keep `firemigrate.config.json` out of git as soon as it holds any credential. FireMigrate removes key material from its error messages.
+Never commit service-account keys, hash signer keys, or connection strings. Error messages redact private keys, connection strings, and `$fbscrypt$` values.
 
-## Limits in this version
+## Limits
 
-- Only top-level collections are migrated. Subcollections are detected but not analyzed.
-- The schema is inferred from a sample (the first 100 documents per collection). Fields that appear only outside the sample are skipped and reported, so review the warnings.
-- Firebase Auth users are summarized but not migrated, and Firebase Storage is not covered.
-- Destructive migrations are not supported.
-
-## Troubleshooting
-
-- **"cannot run yet. Missing configuration"** lists the exact variables to set.
-- **A `pg` warning about `sslmode`** comes from connection strings that use `sslmode=require`. To keep today's strict behavior and silence it, use `sslmode=verify-full`.
-- **`inspect` fails while other commands work,** so check that the service account has permission to read Firestore and Firebase Authentication.
+- One level of parent is stored. Deeper documents are still copied when their collection-group id matches, with the immediate parent only.
+- Auth is a Postgres table, not a Supabase Auth import.
+- Storage bytes are not copied.
+- Destructive migrations and altering existing tables are not supported.
 
 ## Development
 
 ```bash
 pnpm install
 pnpm build
-```
-
-To run the local build:
-
-```bash
 node packages/cli/dist/packages/cli/src/index.js init
 ```
-
-Repository layout:
-
-- `packages/core`: config loading, inspection, schema generation and migration logic
-- `packages/cli`: the `@ezekielreu6/firemigrate` command-line interface
-
-## Releasing
-
-From `packages/cli`, after `pnpm build` and `npm pack --dry-run` look right:
-
-```bash
-npm publish --access public
-```
-
-The tarball should include `dist/packages/cli/src/index.js`, `README.md` and `LICENSE`.
 
 MIT licensed.
