@@ -1,8 +1,8 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { CONFIG_FILE, ConfigError, DEFAULT_BATCH_SIZE, ENV_EXAMPLE_FILE, PACKAGE_RUNNER, defaultConfig } from './config'
+import { CONFIG_FILE, ConfigError, ENV_EXAMPLE_FILE, PACKAGE_RUNNER, defaultConfig } from './config'
 
-const CONFIG_CONTENTS = `${JSON.stringify({ ...defaultConfig(), batchSize: DEFAULT_BATCH_SIZE }, null, 2)}\n`
+const CONFIG_CONTENTS = `${JSON.stringify(defaultConfig(), null, 2)}\n`
 
 const ENV_CONTENTS = [
   '# Firebase service account (Firebase console > Project settings > Service accounts)',
@@ -10,11 +10,18 @@ const ENV_CONTENTS = [
   'FIREBASE_CLIENT_EMAIL=',
   '# Keep the literal \\n sequences from the downloaded JSON key',
   'FIREBASE_PRIVATE_KEY=',
-  '# PostgreSQL destination (not needed for inspect)',
+  '# Direct Postgres URL. For Supabase use the session pooler or direct connection, not the HTTP API URL.',
   'DATABASE_URL=',
+  '# Optional. Firebase console > Authentication > Users > password hash parameters.',
+  '# Used only to build supabase_password_hash. Raw hashes are still stored without these.',
+  'FIREBASE_HASH_SIGNER_KEY=',
+  'FIREBASE_HASH_SALT_SEPARATOR=',
+  'FIREBASE_HASH_ROUNDS=8',
+  'FIREBASE_HASH_MEM_COST=14',
+  '# Optional Storage bucket. Defaults to <project-id>.appspot.com, then <project-id>.firebasestorage.app',
+  'FIREBASE_STORAGE_BUCKET=',
   '',
 ].join('\n')
-
 
 export function initializeProject(args: string[], cwd: string = process.cwd()): string {
   const unknown = args.filter((arg) => arg !== '--force')
