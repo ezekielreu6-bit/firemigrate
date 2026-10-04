@@ -39,6 +39,9 @@ export async function openFirebaseAdmin(config: FireMigrateConfig): Promise<Open
     async listSubcollectionIds(collectionId, documentId) {
       return (await db.collection(collectionId).doc(documentId).listCollections()).map((collection) => collection.id)
     },
+    async listSubcollectionIdsAt(documentPath) {
+      return (await db.doc(documentPath).listCollections()).map((collection) => collection.id)
+    },
     async countCollectionGroup(collectionId) {
       return (await db.collectionGroup(collectionId).count().get()).data().count
     },
