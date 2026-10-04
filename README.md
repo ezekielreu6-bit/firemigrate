@@ -7,6 +7,7 @@ Supabase is a valid destination because it is PostgreSQL. Use the direct databas
 ```bash
 npx @ezekielreu6/firemigrate init
 npx @ezekielreu6/firemigrate inspect
+npx @ezekielreu6/firemigrate tables
 npx @ezekielreu6/firemigrate schema
 npx @ezekielreu6/firemigrate migrate --dry-run
 ```
@@ -17,6 +18,32 @@ When the dry run counts look right:
 npx @ezekielreu6/firemigrate migrate --write
 npx @ezekielreu6/firemigrate verify
 ```
+
+## Agent table list
+
+`tables` is for an agent that will query or finish the migration. It prints JSON only on stdout. Progress stays on stderr. Call only the table names in this list.
+
+```json
+{
+  "version": 1,
+  "instruction": "Use only these PostgreSQL table names.",
+  "tableCount": 2,
+  "tables": [
+    {
+      "table": "users__posts",
+      "sourcePath": "users/*/posts",
+      "kind": "subcollection",
+      "parentTable": "users",
+      "primaryKey": "id",
+      "columns": ["id", "_path", "_parent_id", "_parent_path", "title", "_extra"],
+      "read": "SELECT \"id\", \"title\" FROM \"users__posts\"",
+      "write": "INSERT INTO \"users__posts\" (...) ON CONFLICT (\"id\") DO UPDATE"
+    }
+  ]
+}
+```
+
+`kind` is `collection`, `subcollection`, `auth`, or `storage`. Auth is `firebase_auth_users`. Storage metadata is `firebase_storage_objects`.
 
 ## What is written
 
@@ -30,7 +57,7 @@ Skip a piece with `--skip-auth`, `--skip-storage`, or `--skip-subcollections`.
 
 ## Production cutover
 
-1. Run `inspect` and `schema` against a copy of the database first. Column types are inferred from a sample; anything outside that sample is still written to `_extra`.
+1. Run `inspect`, `tables`, and `schema` against a copy of the database first. Column types are inferred from a sample; anything outside that sample is still written to `_extra`.
 2. Use a Firebase service account that can read Firestore, Auth, and Storage. Password hashes are returned only when that account is allowed to read Auth user credentials.
 3. For Supabase, copy the direct or session connection string. Prefer `sslmode=verify-full` if `pg` warns about `sslmode`.
 4. Keep `"dryRun": true` until a dry run has been reviewed. A write also requires `--write`.
@@ -45,6 +72,8 @@ Skip a piece with `--skip-auth`, `--skip-storage`, or `--skip-subcollections`.
 
 `inspect [--sample=<n>]` is read-only. It counts collections, walks every document for subcollections, summarizes Auth, and lists Storage metadata. `--sample` is 1 to 1000, default 100, and only affects field inference.
 
+`tables` prints the agent JSON manifest of every destination table. It writes nothing.
+
 `schema` prints the proposed SQL and applies nothing.
 
 `migrate` defaults to `--dry-run`. `--write` applies `CREATE TABLE IF NOT EXISTS` and upserts every streamed row. `--destructive` is still refused.
@@ -57,9 +86,9 @@ Environment variables win over `firemigrate.config.json`.
 
 | Variable | Used by |
 | --- | --- |
-| `FIREBASE_PROJECT_ID` | inspect, schema, migrate, verify |
-| `FIREBASE_CLIENT_EMAIL` | inspect, schema, migrate, verify |
-| `FIREBASE_PRIVATE_KEY` | inspect, schema, migrate, verify |
+| `FIREBASE_PROJECT_ID` | inspect, tables, schema, migrate, verify |
+| `FIREBASE_CLIENT_EMAIL` | inspect, tables, schema, migrate, verify |
+| `FIREBASE_PRIVATE_KEY` | inspect, tables, schema, migrate, verify |
 | `DATABASE_URL` | migrate, verify |
 | `FIREBASE_HASH_SIGNER_KEY` | optional, builds `supabase_password_hash` |
 | `FIREBASE_HASH_SALT_SEPARATOR` | optional |
