@@ -1,0 +1,1 @@
+$(cat /tmp/firemigrate-work/reverse.ts)
