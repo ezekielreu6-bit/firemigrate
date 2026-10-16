@@ -131,3 +131,19 @@ node packages/cli/dist/packages/cli/src/index.js init
 ```
 
 MIT licensed.
+
+## Reverse (PostgreSQL → Firestore)
+
+`reverse` inspects any PostgreSQL tables (not only ones created by FireMigrate) and can push them back to Firestore.
+
+```bash
+npx @ezekielreu6/firemigrate reverse                 # inspect only
+npx @ezekielreu6/firemigrate reverse --preview       # sample proposed documents
+npx @ezekielreu6/firemigrate reverse --table=users   # limit to one table
+npx @ezekielreu6/firemigrate reverse --write         # write to Firestore (requires "dryRun": false)
+```
+
+- Works on arbitrary tables. Prefers an `id` column, then primary key, then a text/uuid column for the document id.
+- If `_path` exists (from a prior FireMigrate forward migration), the original document path is reused.
+- `_extra` jsonb is merged into the document.
+- Writes are merge-style and require Firebase credentials plus `"dryRun": false` in config.
