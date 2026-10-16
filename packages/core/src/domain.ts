@@ -413,6 +413,6 @@ export function parseInspectArgs(args: string[]): Partial<InspectOptions> {
   return options
 }
 
-export const VERSION = '0.1.3-beta'
+export const VERSION = '0.3.0-beta.1'
 export { AUTH_TABLE, STORAGE_TABLE }
 export default { createServices, runMigration, runCli }
