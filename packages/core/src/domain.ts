@@ -65,7 +65,7 @@ export function createCliHelp(): string {
     '  reverse   Inspect PostgreSQL tables and propose Firestore collection mappings (read-only)',
     '',
     'migrate options: --dry-run, --write, --destructive, --skip-auth, --skip-storage, --skip-subcollections',
-    'reverse options: (inspect by default; --table=<name> to limit)',
+    'reverse options: --table=<name>, --preview, --write',
     '',
   ].join('\n')
 }
@@ -371,6 +371,8 @@ export async function runCli(args: string[], services?: FireMigrateServices): Pr
   if (command === 'reverse') {
     if (!services) requireConfiguration(command, config, configPath, true)
     const tableFilter = rest.find((a) => a.startsWith('--table='))?.slice('--table='.length)
+    const preview = rest.includes('--preview')
+    const write = rest.includes('--write')
     const report = await inspectPostgresForReverse(config)
     const filtered = tableFilter
       ? { ...report, tables: report.tables.filter((t) => t.table === tableFilter || `${t.schema}.${t.table}` === tableFilter) }
@@ -379,7 +381,16 @@ export async function runCli(args: string[], services?: FireMigrateServices): Pr
       process.exitCode = 1
       return `No table matching "${tableFilter}" found.`
     }
-    return formatReverseInspection(filtered)
+    let out = formatReverseInspection(filtered)
+    if (preview) {
+      const { previewReverse } = await import('./reverse')
+      out += await previewReverse(config, filtered.tables)
+    }
+    if (write) {
+      const { writeReverse } = await import('./reverse')
+      out += '\n' + await writeReverse(config, filtered.tables, { write: true, preview: false, table: tableFilter })
+    }
+    return out
   }
   const options = resolveMigrateOptions(rest, config)
   if (!services) requireConfiguration(command, config, configPath, true)
